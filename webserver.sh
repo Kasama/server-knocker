@@ -1,6 +1,6 @@
 #!/bin/bash
 
-trap "exit" SIGINT
+trap "kill 0" EXIT
 
 socat \
   -v -d -d \

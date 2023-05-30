@@ -5,6 +5,7 @@ use log::info;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch::Sender;
+use tokio::sync::Notify;
 
 pub struct TCPProxy {
     destination: SocketAddr,
@@ -12,6 +13,7 @@ pub struct TCPProxy {
     notification: Arc<Sender<TCPEvent>>,
 }
 
+#[derive(Debug)]
 pub enum TCPEvent {
     DestinationNotResponding,
     UnknownError,
@@ -59,42 +61,51 @@ impl TCPProxy {
         Ok(())
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
+    pub async fn start(&self, can_resume: Option<Arc<Notify>>) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.listen_addr).await?;
 
-        loop {
+        'accept_connection: loop {
             let (input_socket, _) = listener.accept().await?;
             info!("receiving a new connection");
 
-            let output_socket = match if self.destination.is_ipv4() {
-                TcpSocket::new_v4()
-            } else {
-                TcpSocket::new_v6()
-            }?
-            .connect(self.destination)
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    match e.kind() {
-                        std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionRefused => {
-                            info!("Something happened to the destination: {:?}", e);
-                            let _ = self
-                                .notification
-                                .send_replace(TCPEvent::DestinationNotResponding);
-                        }
-                        _ => {
-                            info!("Something unexpected happened to the destination: {:?}", e);
-                            let _ = self.notification.send_replace(TCPEvent::UnknownError);
-                        }
-                    };
-                    continue;
-                }
-            };
+            let output_socket = loop {
+                match if self.destination.is_ipv4() {
+                    TcpSocket::new_v4()
+                } else {
+                    TcpSocket::new_v6()
+                }?
+                .connect(self.destination)
+                .await
+                {
+                    Ok(s) => break Ok(s),
+                    Err(e) => {
+                        match e.kind() {
+                            std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionRefused => {
+                                let _ = self
+                                    .notification
+                                    .send_replace(TCPEvent::DestinationNotResponding);
+                                info!("Waiting to be able to resume");
+                                if let Some(ref r) = can_resume {
+                                    r.notified().await;
+                                } else {
+                                    continue 'accept_connection;
+                                }
+                                info!("Resuming...");
+                            }
+                            _ => {
+                                info!("Something unexpected happened to the destination: {:?}", e);
+                                let _ = self.notification.send_replace(TCPEvent::UnknownError);
+                                break (Err(e));
+                            }
+                        };
+                        continue;
+                    }
+                };
+            }?;
 
             let (input_socket_reader, input_socket_writer) = input_socket.into_split();
             let (output_socket_reader, output_socket_writer) = output_socket.into_split();
