@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::anyhow;
 use clap::Parser;
-use log::{error, info};
+use log::{debug, error, info, trace};
 use nix::sys::signal::Signal::{SIGKILL, SIGTERM};
 use tokio::select;
 use tokio::sync::{watch, Notify};
@@ -26,10 +25,10 @@ struct Command {
     #[arg(long)]
     bind: SocketAddr,
 
-    #[arg(long, default_value_t = 10)]
-    grace_period: u64,
-    #[arg(long, default_value_t = 10)]
-    idle_timeout: u64,
+    #[arg(long, default_value_t = String::from("10s"))]
+    grace_period: String,
+    #[arg(long, default_value_t = String::from("10s"))]
+    idle_timeout: String,
 
     #[arg(long, default_value_t = false)]
     hold_packets: bool,
@@ -44,6 +43,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cmd = Command::parse();
 
+    let idle_timeout = parse_duration::parse(&cmd.idle_timeout)?;
+    let grace_period = parse_duration::parse(&cmd.grace_period)?;
+
     info!("Wait for connection...");
 
     let (network_sender, mut network_receiver) = watch::channel(proxy::TCPEvent::Nothing);
@@ -52,22 +54,21 @@ async fn main() -> anyhow::Result<()> {
     let can_proxy_resume = Arc::new(Notify::new());
 
     let proxy_resume_on_child_creation = can_proxy_resume.clone();
-    tokio::spawn(async move {
-        let mut children: Vec<_> = vec![child::spawn_child(&cmd.command)?];
+    let process_handler = tokio::spawn(async move {
+        let mut children = vec![child::spawn_child(&cmd.command)?];
         loop {
-            let (timer_guard, mut handle) =
-                ResetSignal::default().run_after(Duration::from_secs(cmd.idle_timeout));
+            let (timer_guard, mut handle) = ResetSignal::default().run_after(idle_timeout);
             select! {
                 _ = &mut handle => {
                     children.drain(0..).for_each(|mut c| {
-                        info!("Time for app expired. Terminating {} in session {:?}", c.id(), c.get_session_id());
+                        debug!("Time for app expired. Terminating {} in session {:?}", c.id(), c.get_session_id());
                         match c.kill_process_group(SIGTERM) {
                             Ok(()) => {
-                                let _ = c.try_kill_process_group_after(Duration::from_secs(cmd.grace_period), SIGKILL);
-                                info!("Child killed");
+                                let _ = c.try_kill_process_group_after(grace_period, SIGKILL);
+                                info!("Child terminated");
                                 match c.wait() {
                                     Ok(status) => {
-                                        info!("Child exited with status {}", status);
+                                        debug!("Child exited with status {}", status);
                                     },
                                     Err(e) => {
                                         error!("failed to wait on child: {}", e);
@@ -85,7 +86,8 @@ async fn main() -> anyhow::Result<()> {
                     match *v {
                         TCPEvent::DestinationNotResponding => {
                             let c = child::spawn_child(&cmd.command)?;
-                            info!("No destination responded, spawning child with id {} in session {:?}", c.id(), c.get_session_id());
+                            info!("No response from destination, spawning command");
+                            debug!("Command has id {} in session {:?}", c.id(), c.get_session_id());
                             children.push(c);
                             proxy_resume_on_child_creation.notify_one();
                         },
@@ -94,11 +96,11 @@ async fn main() -> anyhow::Result<()> {
                             return Err(anyhow!("Some unknown error occured")) as anyhow::Result<()>;
                         },
                         TCPEvent::GotPacket => {
-                            info!("Got packet, restarting cooldown");
+                            debug!("Got packet, restarting cooldown");
                             timer_guard.reset();
                         },
                         TCPEvent::Nothing => {
-                            info!("Nothing, ignore me");
+                            trace!("Got a TCPEvent of nothing");
                         },
                     };
                 }
@@ -108,15 +110,15 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Proxy starting...");
 
-    let r = if cmd.hold_packets {
-        Some(can_proxy_resume)
-    } else {
-        None
-    };
-
-    proxy.start(r).await?;
+    proxy
+        .start(if cmd.hold_packets {
+            Some(can_proxy_resume)
+        } else {
+            None
+        })
+        .await?;
 
     info!("Proxy exiting...");
 
-    Ok(())
+    process_handler.await?
 }

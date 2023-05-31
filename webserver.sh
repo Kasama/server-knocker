@@ -2,6 +2,10 @@
 
 trap "kill 0" EXIT
 
+if [[ "$1" = "udp" ]]; then
+  socat -v PIPE udp-recvfrom:8001,fork
+fi
+
 socat \
   -v -d -d \
   TCP-LISTEN:"${1:-8001}",crlf,reuseaddr,fork \

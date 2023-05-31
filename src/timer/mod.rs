@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::info;
+use log::debug;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -41,10 +41,10 @@ impl ResetSignal {
             loop {
                 select! {
                     _ = notifier.notified() => {
-                        info!("Resetting timer");
+                        debug!("Resetting timer");
                     }
                     _ = tokio::time::sleep(duration) => {
-                        info!("Timer expired");
+                        debug!("Timer expired");
                         break;
                     }
                 }
