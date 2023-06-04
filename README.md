@@ -7,6 +7,8 @@ The proxy will also wait for a idle timeout. If it doesn't get any new packets i
 
 Then, if it receives a new packet, it will spawn the child application again so it can continue proxying packets to it.
 
+If you know serverless services like AWS Lambda, you can think of this in a similar way. It aims to reduce resource usage by shutting down the idle server and spinning it up when a net request arives.
+
 Motivation
 ==========
 
