@@ -7,7 +7,6 @@ use log::{error, info};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::watch::Sender;
-use tokio::sync::Notify;
 
 use super::ProxyEvent;
 
@@ -55,7 +54,7 @@ impl UDPProxy {
         Ok(()) as anyhow::Result<()>
     }
 
-    pub async fn start(&self, can_resume: Option<Arc<Notify>>) -> anyhow::Result<()> {
+    pub async fn start(&self) -> anyhow::Result<()> {
         let local = Arc::new(UdpSocket::bind(self.listen_addr).await?);
 
         let (response_sender, receiver) = channel::<(SocketAddr, Vec<u8>)>(512);
