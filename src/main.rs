@@ -9,9 +9,10 @@ use tokio::select;
 use tokio::sync::{watch, Notify};
 
 use crate::child::LinuxChild;
-use crate::proxy::TCPEvent;
+use crate::proxy::ProxyEvent;
 
-use self::proxy::TCPProxy;
+use self::proxy::tcp::TCPProxy;
+use self::proxy::udp::UDPProxy;
 use self::timer::ResetSignal;
 
 mod child;
@@ -33,6 +34,9 @@ struct Command {
     #[arg(long, default_value_t = false)]
     hold_packets: bool,
 
+    #[arg(short = 'u', long, default_value_t = false)]
+    udp: bool,
+
     #[arg(long)]
     command: String,
 }
@@ -48,8 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Wait for connection...");
 
-    let (network_sender, mut network_receiver) = watch::channel(proxy::TCPEvent::Nothing);
-    let proxy = TCPProxy::new(cmd.dest, cmd.bind, network_sender);
+    let (network_sender, mut network_receiver) = watch::channel(proxy::ProxyEvent::Nothing);
 
     let can_proxy_resume = Arc::new(Notify::new());
 
@@ -84,22 +87,22 @@ async fn main() -> anyhow::Result<()> {
                 _ = network_receiver.changed() => {
                     let v = network_receiver.borrow();
                     match *v {
-                        TCPEvent::DestinationNotResponding => {
+                        ProxyEvent::DestinationNotResponding => {
                             let c = child::spawn_child(&cmd.command)?;
                             info!("No response from destination, spawning command");
                             debug!("Command has id {} in session {:?}", c.id(), c.get_session_id());
                             children.push(c);
                             proxy_resume_on_child_creation.notify_one();
                         },
-                        TCPEvent::UnknownError => {
+                        ProxyEvent::UnknownError => {
                             error!("Some unknown error occured");
                             return Err(anyhow!("Some unknown error occured")) as anyhow::Result<()>;
                         },
-                        TCPEvent::GotPacket => {
+                        ProxyEvent::GotPacket => {
                             debug!("Got packet, restarting cooldown");
                             timer_guard.reset();
                         },
-                        TCPEvent::Nothing => {
+                        ProxyEvent::Nothing => {
                             trace!("Got a TCPEvent of nothing");
                         },
                     };
@@ -110,13 +113,19 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Proxy starting...");
 
-    proxy
-        .start(if cmd.hold_packets {
-            Some(can_proxy_resume)
-        } else {
-            None
-        })
-        .await?;
+    if cmd.udp {
+        UDPProxy::new(cmd.dest, cmd.bind, network_sender)
+            .start(None)
+            .await?;
+    } else {
+        TCPProxy::new(cmd.dest, cmd.bind, network_sender)
+            .start(if cmd.hold_packets {
+                Some(can_proxy_resume)
+            } else {
+                None
+            })
+            .await?;
+    }
 
     info!("Proxy exiting...");
 
