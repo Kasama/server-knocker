@@ -133,6 +133,8 @@ async fn main() -> anyhow::Result<()> {
                     };
                 }
             }
+            // cleanup to ensure pending threads are aborted
+            handle.abort();
         }
     });
 
